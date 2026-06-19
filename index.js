@@ -64,9 +64,24 @@ async function run() {
         // Connect the client to the server (optional starting in v4.7)
         // await client.connect();
 
+        // await client.connect();
         const database = client.db("BookVerse");
-        // const facilitiesCollection = database.collection("facilities");
+        const userCollection = database.collection("user");
 
+        // user preference [private]
+        app.patch('/user/preference', verifyToken, async (req, res) => {
+            // console.log('server body: ', req.body)
+            // console.log('verified user payload: ', req.user)
+
+            const userId = req.user.id;
+            if (!userId) {
+                return res.status(400).json({ message: 'Unable to resolve user ID from token payload' });
+            }
+
+            const updatedData = req.body;
+            const result = await userCollection.updateOne({ _id: new ObjectId(userId) }, { $set: updatedData });
+            res.send(result);
+        });
 
         // app.get('/protected-message', verifyToken, async (req, res) => {
         //     // res.send(result);
@@ -76,8 +91,8 @@ async function run() {
         // });
 
         // Send a ping to confirm a successful connection
-        await client.db("admin").command({ ping: 1 });
-        console.log("Pinged your deployment. You successfully connected to MongoDB!");
+        // await client.db("admin").command({ ping: 1 });
+        // console.log("Pinged your deployment. You successfully connected to MongoDB!");
     } finally {
         // Ensures that the client will close when you finish/error
         // await client.close();
