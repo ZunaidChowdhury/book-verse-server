@@ -1,5 +1,5 @@
-import dns from "node:dns/promises";
-dns.setServers(["8.8.8.8", "1.1.1.1"]);
+// import dns from "node:dns/promises";
+// dns.setServers(["8.8.8.8", "1.1.1.1"]);
 
 
 
@@ -61,15 +61,24 @@ const client = new MongoClient(uri, {
 
 async function run() {
     try {
-        // Connect the client to the server (optional starting in v4.7)
-        // await client.connect();
+        // Connect the client to the server (optional starting in v4.7)        
 
         // await client.connect();
         const database = client.db("BookVerse");
         const userCollection = database.collection("user");
+        const bookCollection = database.collection("book");
+
+        // get featured books [public]
+        app.get('/api/featured-books', async (req, res) => {
+            const cursor = bookCollection.find({ featuredPosition: { $gte: 1, $lte: 8 } }).sort({ featuredPosition: 1 });
+            const result = await cursor.toArray();
+
+            res.send(result);
+        });
+
 
         // user preference [private]
-        app.patch('/user/preference', verifyToken, async (req, res) => {
+        app.patch('/api/user/preference', verifyToken, async (req, res) => {
             // console.log('server body: ', req.body)
             // console.log('verified user payload: ', req.user)
 
@@ -80,6 +89,13 @@ async function run() {
 
             const updatedData = req.body;
             const result = await userCollection.updateOne({ _id: new ObjectId(userId) }, { $set: updatedData });
+            res.send(result);
+        });
+
+        // get users
+        app.get('/api/users', async (req, res) => {
+            const cursor = userCollection.find();
+            const result = await cursor.toArray();
             res.send(result);
         });
 
