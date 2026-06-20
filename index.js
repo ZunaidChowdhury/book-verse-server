@@ -49,7 +49,29 @@ const verifyToken = async (req, res, next) => {
 
 }
 
+// must be used after verifyToken middleware
+const verifyReader = async (req, res, next) => {
+    if (req.user?.role !== 'reader') {
+        return res.status(403).send({ message: 'forbidden access' })
+    }
+    next();
+}
 
+// must be used after verifyToken middleware
+const verifyWriter = async (req, res, next) => {
+    if (req.user?.role !== 'writer') {
+        return res.status(403).send({ message: 'forbidden access' })
+    }
+    next();
+}
+
+// must be used after verifyToken middleware
+const verifyAdmin = async (req, res, next) => {
+    if (req.user.role !== 'admin') {
+        return res.status(403).send({ message: 'forbidden access' })
+    }
+    next();
+}
 
 const client = new MongoClient(uri, {
     serverApi: {
@@ -105,7 +127,18 @@ async function run() {
         });
 
 
-        // user preference [private]
+        // writer
+        // post a book [protected, writer only]
+        app.post('/api/books', verifyToken, verifyWriter, async (req, res) => {
+            const newBook = req.body;
+            const result = await bookCollection.insertOne(newBook);
+            res.send(result);
+        });
+
+
+
+
+        // test user preference [private]
         app.patch('/api/user/preference', verifyToken, async (req, res) => {
             // console.log('server body: ', req.body)
             // console.log('verified user payload: ', req.user)
@@ -120,8 +153,8 @@ async function run() {
             res.send(result);
         });
 
-        // get users
-        app.get('/api/users', async (req, res) => {
+        // test get users
+        app.get('/api/users', verifyToken, verifyAdmin,async (req, res) => {
             const cursor = userCollection.find();
             const result = await cursor.toArray();
             res.send(result);
