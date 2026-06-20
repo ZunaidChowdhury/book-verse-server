@@ -1,5 +1,5 @@
-// import dns from "node:dns/promises";
-// dns.setServers(["8.8.8.8", "1.1.1.1"]);
+import dns from "node:dns/promises";
+dns.setServers(["8.8.8.8", "1.1.1.1"]);
 
 
 
@@ -74,6 +74,34 @@ async function run() {
             const result = await cursor.toArray();
 
             res.send(result);
+        });
+
+        // get top-writers [public]
+        app.get('/api/top-writers', async (req, res) => {
+            try {
+                const pipeline = [
+                    // Step 1: Filter to get only users who are writers
+                    {
+                        $match: { role: "writer" }
+                    },
+                    // Step 2: Sort by totalSales field in descending order (-1)
+                    {
+                        $sort: { totalSales: -1 }
+                    },
+                    // Step 3: Restrict the final array output to exactly 3 documents
+                    {
+                        $limit: 3
+                    }
+                ];
+
+                // Execute the aggregation query on your collection
+                const result = await userCollection.aggregate(pipeline).toArray();
+
+                res.send(result);
+            } catch (error) {
+                console.error("Error fetching top writers:", error);
+                res.status(500).send({ error: true, message: error.message });
+            }
         });
 
 
