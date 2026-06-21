@@ -1,17 +1,17 @@
 import dns from "node:dns/promises";
 dns.setServers(["8.8.8.8", "1.1.1.1"]);
 
-
-
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 
 import { MongoClient, ObjectId, ServerApiVersion } from 'mongodb';
 import { createRemoteJWKSet, jwtVerify } from "jose";
+import Stripe from "stripe";
 
 const app = express();
 dotenv.config();
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 const uri = process.env.MONGODB_URI;
 const port = process.env.PORT || 5001;
@@ -90,7 +90,7 @@ async function run() {
         const userCollection = database.collection("user");
         const bookCollection = database.collection("book");
 
-        // get featured books [public]
+        // get featured books [public]______________________________________________
         app.get('/api/featured-books', async (req, res) => {
             const cursor = bookCollection.find({ featuredPosition: { $gte: 1, $lte: 8 } }).sort({ featuredPosition: 1 });
             const result = await cursor.toArray();
@@ -226,16 +226,111 @@ async function run() {
             }
         });
 
-
-
-        // writer
-        // post a book [protected, writer only]
-        app.post('/api/books', verifyToken, verifyWriter, async (req, res) => {
-            const newBook = req.body;
-            const result = await bookCollection.insertOne(newBook);
-            res.send(result);
+        // get a book [public] 
+        app.get('/api/books/:bookId', async (req, res) => {
+            const bookId = req.params.bookId;
+            const book = await bookCollection.findOne({ _id: new ObjectId(bookId) });
+            res.send(book);
         });
 
+        // writer_____________________________________________________________________
+        // post a book [protected, writer only]
+        app.post('/api/books', verifyToken, verifyWriter, async (req, res) => {
+            try {
+                const { title, description, content, image, price, genres } = req.body;
+                const { name: writerName, id: writerId } = req.user;
+
+                // 1. Convert price to cents safely ($14.99 -> 1499)
+                const priceInCents = Math.round(parseFloat(price) * 100);
+
+                // 2. Automatically create the base product catalog entry on Stripe
+                const stripeProduct = await stripe.products.create({
+                    name: title,
+                    description: description.substring(0, 500), // Stripe limits to 500 chars
+                    images: [image],
+                    metadata: { writerName, writerId }
+                });
+
+                // 3. Automatically attach the currency price model to that Stripe product
+                const stripePrice = await stripe.prices.create({
+                    product: stripeProduct.id,
+                    unit_amount: priceInCents,
+                    currency: 'usd',
+                });
+
+                // 4. Prepare your complete document object including the native Stripe track IDs
+                const newBookDoc = {
+                    ...req.body,
+                    featuredPosition: 0,
+                    writerName,
+                    writerId,
+                    price: parseFloat(price),
+                    rating: 5.0,
+                    soldQuantity: 0,
+
+                    stripeProductId: stripeProduct.id,  // <-- Saved for reference
+                    stripePriceId: stripePrice.id,      // <-- Saved for purchase checkout
+
+                    createdAt: new Date(),
+                    updatedAt: new Date()
+                };
+
+                // console.log("New Book Document to Insert:", newBookDoc);
+                // 5. Insert directly into your plain MongoDB collection
+                const result = await bookCollection.insertOne(newBookDoc);
+                // console.log("MongoDB Insert Result:", result);
+
+                res.status(201).send({
+                    success: true,
+                    insertedId: result.insertedId,
+                    book: newBookDoc
+                });
+
+            } catch (error) {
+                console.error("Stripe Automate Error:", error);
+                res.status(500).send({ success: false, error: error.message });
+            }
+        });
+
+
+
+        // reader______________________________________________________________________________________
+        app.post('/api/checkout/create-session', verifyToken, verifyReader, async (req, res) => {
+            console.log('Received checkout session request with body:', req.body);
+            try {
+                const { bookId } = req.body;
+
+                // Pull the book target document straight from MongoDB
+                const book = await bookCollection.findOne({ _id: new ObjectId(bookId) });
+
+                if (!book || !book.stripePriceId) {
+                    console.log("Book not found or missing Stripe price association:", book);
+                    return res.status(404).send({ error: "Missing automated Stripe price association." });
+                }
+
+                // Initialize the Stripe remote session tracking
+                const session = await stripe.checkout.sessions.create({
+                    mode: 'payment',
+                    line_items: [
+                        {
+                            price: book.stripePriceId, // Use the ID created in Step 1
+                            quantity: 1,
+                        },
+                    ],
+                    metadata: {
+                        bookId: bookId,
+                        userId: req.user.id,
+                    },
+                    success_url: `${process.env.CLIENT_URL}/books/${bookId}?status=success`,
+                    cancel_url: `${process.env.CLIENT_URL}/books/${bookId}?status=cancelled`,
+                });
+                console.log("Checkout session created:", session.url);
+                res.send({ url: session.url });
+            } catch (error) {
+                console.error("Error creating checkout session:", error);
+                res.status(500).send({ error: error.message });
+            }
+        });
 
 
 
@@ -255,7 +350,8 @@ async function run() {
         });
 
         // test get users
-        app.get('/api/users', verifyToken, verifyAdmin, async (req, res) => {
+        app.get('/api/users', verifyToken, async (req, res) => {
+            // console.log('Received request to fetch users:', req.user);
             const cursor = userCollection.find();
             const result = await cursor.toArray();
             res.send(result);
