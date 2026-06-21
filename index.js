@@ -127,6 +127,82 @@ async function run() {
         });
 
 
+        // get all books with search, filters, and sorting [public]
+        app.get('/api/books', async (req, res) => {
+            try {
+                const {
+                    search = '',
+                    genres = '',
+                    availability = 'all',
+                    minPrice = '0',
+                    maxPrice = '1000',
+                    sort = 'newest'
+                } = req.query;
+
+                // Build filter object
+                const filter = {};
+
+                // Search filter for title and writer name (case-insensitive)
+                if (search.trim()) {
+                    filter.$or = [
+                        { title: { $regex: search.trim(), $options: 'i' } },
+                        { writerName: { $regex: search.trim(), $options: 'i' } }
+                    ];
+                }
+
+                // Genre filter (support multiple genres)
+                if (genres.trim()) {
+                    const genreArray = genres.split(',').map(g => g.trim()).filter(Boolean);
+                    if (genreArray.length > 0) {
+                        filter.genres = { $in: genreArray };
+                    }
+                }
+
+                // Availability filter
+                if (availability !== 'all') {
+                    if (availability === 'in-stock') {
+                        filter.availabilityStatus = 'Available';
+                    } else if (availability === 'sold') {
+                        filter.availabilityStatus = 'Sold Out';
+                    }
+                }
+
+                // Price range filter
+                const min = parseInt(minPrice) || 0;
+                const max = parseInt(maxPrice) || 1000;
+                filter.price = { $gte: min, $lte: max };
+
+                // Determine sort order
+                let sortOrder = {};
+                switch (sort) {
+                    case 'price-low':
+                        sortOrder = { price: 1 }; // ascending
+                        break;
+                    case 'price-high':
+                        sortOrder = { price: -1 }; // descending
+                        break;
+                    case 'rating':
+                        sortOrder = { rating: -1 }; // highest first
+                        break;
+                    case 'newest':
+                    default:
+                        sortOrder = { _id: -1 }; // newest (most recent ObjectId first)
+                        break;
+                }
+
+                // Execute query with filters and sort
+                const cursor = bookCollection.find(filter).sort(sortOrder);
+                const result = await cursor.toArray();
+
+                res.send(result);
+            } catch (error) {
+                console.error('Error fetching books:', error);
+                res.status(500).send({ error: true, message: error.message });
+            }
+        });
+
+
+
         // writer
         // post a book [protected, writer only]
         app.post('/api/books', verifyToken, verifyWriter, async (req, res) => {
@@ -154,7 +230,7 @@ async function run() {
         });
 
         // test get users
-        app.get('/api/users', verifyToken, verifyAdmin,async (req, res) => {
+        app.get('/api/users', verifyToken, verifyAdmin, async (req, res) => {
             const cursor = userCollection.find();
             const result = await cursor.toArray();
             res.send(result);
