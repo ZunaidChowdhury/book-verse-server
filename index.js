@@ -127,7 +127,7 @@ async function run() {
         });
 
 
-        // get all books with search, filters, and sorting [public]
+        // get all books with search, filters, sorting, and pagination [public]
         app.get('/api/books', async (req, res) => {
             try {
                 const {
@@ -136,7 +136,9 @@ async function run() {
                     availability = 'all',
                     minPrice = '0',
                     maxPrice = '1000',
-                    sort = 'newest'
+                    sort = 'newest',
+                    page = '1',
+                    limit = '9'
                 } = req.query;
 
                 // Build filter object
@@ -190,11 +192,34 @@ async function run() {
                         break;
                 }
 
-                // Execute query with filters and sort
-                const cursor = bookCollection.find(filter).sort(sortOrder);
-                const result = await cursor.toArray();
+                // Pagination
+                const pageNum = Math.max(parseInt(page) || 1, 1);
+                const limitNum = Math.max(parseInt(limit) || 9, 1);
+                const skip = (pageNum - 1) * limitNum;
 
-                res.send(result);
+                // Get total count for pagination metadata
+                const totalBooks = await bookCollection.countDocuments(filter);
+                const totalPages = Math.ceil(totalBooks / limitNum);
+
+                // Execute query with filters, sort, and pagination
+                const result = await bookCollection
+                    .find(filter)
+                    .sort(sortOrder)
+                    .skip(skip)
+                    .limit(limitNum)
+                    .toArray();
+
+                res.send({
+                    books: result,
+                    pagination: {
+                        currentPage: pageNum,
+                        totalPages,
+                        totalBooks,
+                        limit: limitNum,
+                        hasNextPage: pageNum < totalPages,
+                        hasPrevPage: pageNum > 1
+                    }
+                });
             } catch (error) {
                 console.error('Error fetching books:', error);
                 res.status(500).send({ error: true, message: error.message });
