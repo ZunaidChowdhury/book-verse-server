@@ -89,6 +89,7 @@ async function run() {
         const database = client.db("BookVerse");
         const userCollection = database.collection("user");
         const bookCollection = database.collection("book");
+        const transactionCollection = database.collection("transaction");
 
         // get featured books [public]______________________________________________
         app.get('/api/featured-books', async (req, res) => {
@@ -294,6 +295,180 @@ async function run() {
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+        // _____________________________________________________________________
+        // WRITER ENDPOINTS
+        // _____________________________________________________________________
+
+        // 1. Get own ebooks (Manage Ebooks list)
+        app.get('/api/writer/my-books', verifyToken, verifyWriter, async (req, res) => {
+            try {
+                // Safely fetch writer identifier from verified JWT payload
+                const writerId = req.user.id;
+
+                const books = await bookCollection
+                    .find({ writerId: writerId })
+                    .sort({ _id: -1 }) // Newest first
+                    .toArray();
+
+                res.send(books);
+            } catch (error) {
+                console.error("Error fetching writer books:", error);
+                res.status(500).send({ error: true, message: error.message });
+            }
+        });
+
+        // 2. Update Ebook (Edit Ebook data or visibility status)
+        app.patch('/api/writer/books/:bookId', verifyToken, verifyWriter, async (req, res) => {
+            try {
+                const bookId = req.params.bookId;
+                const writerId = req.user.id;
+                const updates = req.body;
+                // console.log("Received update request for bookId:", bookId, "with updates:", updates);
+
+                // Strip out restricted fields to prevent tampering
+                delete updates._id;
+                delete updates.writerId;
+                delete updates.writerEmail;
+
+                // Ensure the book belongs to the requesting writer
+                const filter = { _id: new ObjectId(bookId), writerId: writerId };
+                const updateDoc = { $set: updates };
+
+                // console.log("Filter for update:", filter, "Update document:", updateDoc);
+                const result = await bookCollection.updateOne(filter, updateDoc);
+
+                if (result.matchedCount === 0) {
+                    return res.status(404).send({ error: true, message: "Book not found or unauthorized" });
+                }
+
+                res.send({ success: true, message: "Book updated successfully", result });
+            } catch (error) {
+                console.error("Error updating book:", error);
+                res.status(500).send({ error: true, message: error.message });
+            }
+        });
+
+        // 3. Delete Ebook
+        app.delete('/api/writer/books/:bookId', verifyToken, verifyWriter, async (req, res) => {
+            try {
+                const bookId = req.params.bookId;
+                const writerId = req.user.id;
+
+                const filter = { _id: new ObjectId(bookId), writerId: writerId };
+                const result = await bookCollection.deleteOne(filter);
+
+                if (result.deletedCount === 0) {
+                    return res.status(404).send({ error: true, message: "Book not found or unauthorized" });
+                }
+
+                res.send({ success: true, message: "Book deleted successfully", result });
+            } catch (error) {
+                console.error("Error deleting book:", error);
+                res.status(500).send({ error: true, message: error.message });
+            }
+        });
+
+        // 4. Get Writer Sales History
+        app.get('/api/writer/sales-history', verifyToken, verifyWriter, async (req, res) => {
+            try {
+                const writerId = req.user.id;
+                const salesCollection = database.collection("sales"); // Setup context for sales tracking
+
+                // Aggregate sales and resolve document joins natively
+                const salesPipeline = [
+                    { $match: { writerId: writerId } },
+                    {
+                        $lookup: {
+                            from: "user",
+                            localField: "buyerId",
+                            foreignField: "_id", // standard lookup or matching fallback string
+                            as: "buyerInfo"
+                        }
+                    },
+                    { $unwind: { path: "$buyerInfo", preserveNullAndEmptyArrays: true } },
+                    {
+                        $project: {
+                            _id: 1,
+                            bookTitle: 1,
+                            purchaseDate: 1,
+                            amount: 1,
+                            buyerName: { $ifNull: ["$buyerInfo.name", "$buyerEmail"] }
+                        }
+                    },
+                    { $sort: { purchaseDate: -1 } }
+                ];
+
+                const salesHistory = await salesCollection.aggregate(salesPipeline).toArray();
+                res.send(salesHistory);
+            } catch (error) {
+                console.error("Error fetching sales history:", error);
+                res.status(500).send({ error: true, message: error.message });
+            }
+        });
+
+        // _____________________________________________________________________
+        // READER / PUBLIC WISHLIST ENDPOINTS
+        // _____________________________________________________________________
+
+        // 5. Get logged-in user's wishlist details (Gallery mapping)
+        app.get('/api/wishlist', verifyToken, async (req, res) => {
+            try {
+                const userId = req.user.id;
+                const wishlistCollection = database.collection("wishlist");
+
+                // Aggregate to pull complete book objects straight into the wishlist payload
+                const pipeline = [
+                    { $match: { userId: userId } },
+                    {
+                        $lookup: {
+                            from: "book",
+                            localField: "bookId",
+                            foreignField: "_id",
+                            as: "bookDetails"
+                        }
+                    },
+                    { $unwind: "$bookDetails" },
+                    { $replaceRoot: { newRoot: "$bookDetails" } } // Directly gives an array of book models
+                ];
+
+                const wishlistBooks = await wishlistCollection.aggregate(pipeline).toArray();
+                res.send(wishlistBooks);
+            } catch (error) {
+                console.error("Error fetching wishlist:", error);
+                res.status(500).send({ error: true, message: error.message });
+            }
+        });
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
         // reader______________________________________________________________________________________
         app.post('/api/checkout/create-session', verifyToken, verifyReader, async (req, res) => {
             console.log('Received checkout session request with body:', req.body);
@@ -317,10 +492,15 @@ async function run() {
                             quantity: 1,
                         },
                     ],
+
                     metadata: {
                         bookId: bookId,
                         userId: req.user.id,
+                        buyerName: req.user.name,
+                        buyerEmail: req.user.email,
+                        bookTitle: book.title,
                     },
+
                     success_url: `${process.env.CLIENT_URL}/books/${bookId}?status=success`,
                     cancel_url: `${process.env.CLIENT_URL}/books/${bookId}?status=cancelled`,
                 });
@@ -332,7 +512,58 @@ async function run() {
             }
         });
 
+        app.post('/api/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+            const sig = req.headers['stripe-signature'];
+            let event;
 
+            try {
+                // Verify that the request actually came from Stripe
+                event = stripe.webhooks.constructEvent(
+                    req.body,
+                    sig,
+                    process.env.STRIPE_WEBHOOK_SECRET // Get this from Stripe CLI or Dashboard
+                );
+            } catch (err) {
+                console.error(`Webhook Signature Verification Failed:`, err.message);
+                return res.status(400).send(`Webhook Error: ${err.message}`);
+            }
+
+            // Handle the specific successful payment event
+            if (event.type === 'checkout.session.completed') {
+                const session = event.data.object;
+
+                // Extract the variables we stashed in metadata earlier
+                const { userId, buyerName, buyerEmail, bookTitle, bookId } = session.metadata;
+                const amountPaid = session.amount_total / 100; // Stripe provides this in cents (e.g., 1000 = $10.00)
+
+                try {
+                    const newTransaction = {
+                        buyerId: userId,
+                        buyerName: buyerName,
+                        buyerEmail: buyerEmail,
+                        bookId: bookId,
+                        bookTitle: bookTitle,
+                        amount: amountPaid,
+                        stripeSessionId: session.id, // Good practice to save for reference
+                        purchaseDate: new Date(),
+                    };
+
+                    const result = await transactionCollection.insertOne(newTransaction);
+                    console.log(`Transaction saved successfully for Book ID: ${bookId}, Tx ID: ${result.insertedId}`);
+
+                    // OPTIONAL: Update user collection here to give them instant library access
+                    // await userCollection.updateOne({ _id: new ObjectId(userId) }, { $push: { purchasedBooks: bookId } });
+
+                } catch (dbError) {
+                    console.error("Failed to insert transaction into DB:", dbError);
+                    // Return a 500 so Stripe knows your server failed and will retry sending the event
+                    return res.status(500).send("Database insertion failed");
+                }
+            }
+
+            // Return a 200 response to Stripe to acknowledge receipt of the event
+            res.json({ received: true });
+        });
 
         // test user preference [private]
         app.patch('/api/user/preference', verifyToken, async (req, res) => {
@@ -365,8 +596,8 @@ async function run() {
         // });
 
         // Send a ping to confirm a successful connection
-        // await client.db("admin").command({ ping: 1 });
-        // console.log("Pinged your deployment. You successfully connected to MongoDB!");
+        await client.db("admin").command({ ping: 1 });
+        console.log("Pinged your deployment. You successfully connected to MongoDB!");
     } finally {
         // Ensures that the client will close when you finish/error
         // await client.close();
@@ -382,3 +613,24 @@ app.get('/', (req, res) => {
 app.listen(port, () => {
     console.log(`Server is running on port: ${port}`)
 })
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
