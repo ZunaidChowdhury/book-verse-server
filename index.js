@@ -513,55 +513,71 @@ async function run() {
         });
 
         app.post('/api/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+            console.log('=== WEBHOOK RECEIVED ===');
+            console.log('Received Stripe webhook event');
             const sig = req.headers['stripe-signature'];
+            console.log('Signature present:', !!sig);
+            console.log('Webhook secret configured:', !!process.env.STRIPE_WEBHOOK_SECRET);
             let event;
 
             try {
                 // Verify that the request actually came from Stripe
+                console.log('Attempting to construct event...');
                 event = stripe.webhooks.constructEvent(
                     req.body,
                     sig,
                     process.env.STRIPE_WEBHOOK_SECRET // Get this from Stripe CLI or Dashboard
                 );
+                console.log('✓ Event verified successfully');
             } catch (err) {
-                console.error(`Webhook Signature Verification Failed:`, err.message);
+                console.error(`✗ Webhook Signature Verification Failed:`, err.message);
                 return res.status(400).send(`Webhook Error: ${err.message}`);
             }
 
+            console.log('Event type:', event.type);
+            console.log('Event session/object id:', event.data.object.id);
+            
             // Handle the specific successful payment event
             if (event.type === 'checkout.session.completed') {
+                console.log('✓ Processing checkout.session.completed event');
                 const session = event.data.object;
 
                 // Extract the variables we stashed in metadata earlier
                 const { userId, buyerName, buyerEmail, bookTitle, bookId } = session.metadata;
+                console.log('Metadata:', { userId, buyerName, buyerEmail, bookTitle, bookId });
                 const amountPaid = session.amount_total / 100; // Stripe provides this in cents (e.g., 1000 = $10.00)
 
                 try {
                     const newTransaction = {
-                        buyerId: userId,
                         buyerName: buyerName,
                         buyerEmail: buyerEmail,
-                        bookId: bookId,
                         bookTitle: bookTitle,
                         amount: amountPaid,
-                        stripeSessionId: session.id, // Good practice to save for reference
-                        purchaseDate: new Date(),
+                        paymentDate: new Date(),
+                        type: 'purchase',
+                        buyerId: userId,
+                        bookId: bookId,
+                        stripeSessionId: session.id,
                     };
-
+                    console.log('Attempting to save transaction:', newTransaction);
+                    
                     const result = await transactionCollection.insertOne(newTransaction);
-                    console.log(`Transaction saved successfully for Book ID: ${bookId}, Tx ID: ${result.insertedId}`);
+                    console.log(`✓ Transaction saved successfully for Book ID: ${bookId}, Tx ID: ${result.insertedId}`);
 
                     // OPTIONAL: Update user collection here to give them instant library access
                     // await userCollection.updateOne({ _id: new ObjectId(userId) }, { $push: { purchasedBooks: bookId } });
 
                 } catch (dbError) {
-                    console.error("Failed to insert transaction into DB:", dbError);
+                    console.error("✗ Failed to insert transaction into DB:", dbError);
                     // Return a 500 so Stripe knows your server failed and will retry sending the event
                     return res.status(500).send("Database insertion failed");
                 }
+            } else {
+                console.log(`Webhook event type '${event.type}' - no action needed`);
             }
 
             // Return a 200 response to Stripe to acknowledge receipt of the event
+            console.log('=== WEBHOOK COMPLETE ===\n');
             res.json({ received: true });
         });
 
