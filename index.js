@@ -19,7 +19,16 @@ const port = process.env.PORT || 5001;
 
 // MIDDLEWARES
 app.use(cors());
-app.use(express.json());
+app.use(
+    express.json({
+        verify: (req, res, buf) => {
+            // If it is the stripe webhook route, attach the raw buffer to req.rawBody
+            if (req.originalUrl.startsWith('/api/webhooks/stripe')) {
+                req.rawBody = buf;
+            }
+        }
+    })
+);
 
 const JWKS = createRemoteJWKSet(
     new URL(`${process.env.CLIENT_URL}/api/auth/jwks`)
@@ -90,6 +99,63 @@ async function run() {
         const userCollection = database.collection("user");
         const bookCollection = database.collection("book");
         const transactionCollection = database.collection("transaction");
+
+        // STRIPE WEBHOOK ENDPOINT
+        app.post('/api/webhooks/stripe', async (req, res) => {
+            const sig = req.headers['stripe-signature'];
+            let event;
+
+            try {
+                event = stripe.webhooks.constructEvent(
+                    req.rawBody,
+                    sig,
+                    process.env.STRIPE_WEBHOOK_SECRET
+                );
+            } catch (err) {
+                console.error(`Webhook Error: ${err.message}`);
+                return res.status(400).send(`Webhook Error: ${err.message}`);
+            }
+
+            if (event.type === 'checkout.session.completed') {
+                const session = event.data.object;
+
+                const userId = session.metadata?.userId;
+                const userName = session.metadata?.userName;
+                const userEmail = session.metadata?.userEmail;
+                const bookId = session.metadata?.bookId;
+                const bookTitle = session.metadata?.bookTitle;
+
+                const transactionDoc = {
+                    stripeSessionId: session.id,
+                    paymentIntentId: session.payment_intent,
+                    
+                    userId,
+                    userName,
+                    userEmail,
+                    bookId,
+                    bookTitle,
+
+                    amountPaid: session.amount_total / 100,
+                    type: 'purchase',
+                    currency: session.currency,
+                    paymentStatus: session.payment_status,
+                    purchasedAt: new Date(),
+
+                };
+
+                try {
+                    const result = await transactionCollection.insertOne(transactionDoc);
+                    console.log(`Transaction successfully recorded in MongoDB: ${result.insertedId}`);
+                } catch (dbError) {
+                    console.error("Failed to save transaction to MongoDB:", dbError);
+                }
+            }
+
+            res.json({ received: true });
+        });
+
+
+
 
         // get featured books [public]______________________________________________
         app.get('/api/featured-books', async (req, res) => {
@@ -494,11 +560,12 @@ async function run() {
                     ],
 
                     metadata: {
-                        bookId: bookId,
                         userId: req.user.id,
-                        buyerName: req.user.name,
-                        buyerEmail: req.user.email,
+                        userName: req.user.name,
+                        userEmail: req.user.email,
+                        bookId: book._id.toString(),
                         bookTitle: book.title,
+                        // amountPaid: book.title,
                     },
 
                     success_url: `${process.env.CLIENT_URL}/books/${bookId}?status=success`,
@@ -512,75 +579,78 @@ async function run() {
             }
         });
 
-        app.post('/api/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
-            console.log('=== WEBHOOK RECEIVED ===');
-            console.log('Received Stripe webhook event');
-            const sig = req.headers['stripe-signature'];
-            console.log('Signature present:', !!sig);
-            console.log('Webhook secret configured:', !!process.env.STRIPE_WEBHOOK_SECRET);
-            let event;
+        // app.post('/api/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+        //     console.log('=== WEBHOOK RECEIVED ===');
+        //     console.log('Received Stripe webhook event');
+        //     const sig = req.headers['stripe-signature'];
+        //     console.log('Signature present:', !!sig);
+        //     console.log('Webhook secret configured:', !!process.env.STRIPE_WEBHOOK_SECRET);
+        //     let event;
 
-            try {
-                // Verify that the request actually came from Stripe
-                console.log('Attempting to construct event...');
-                event = stripe.webhooks.constructEvent(
-                    req.body,
-                    sig,
-                    process.env.STRIPE_WEBHOOK_SECRET // Get this from Stripe CLI or Dashboard
-                );
-                console.log('✓ Event verified successfully');
-            } catch (err) {
-                console.error(`✗ Webhook Signature Verification Failed:`, err.message);
-                return res.status(400).send(`Webhook Error: ${err.message}`);
-            }
+        //     try {
+        //         // Verify that the request actually came from Stripe
+        //         console.log('Attempting to construct event...');
+        //         event = stripe.webhooks.constructEvent(
+        //             req.body,
+        //             sig,
+        //             process.env.STRIPE_WEBHOOK_SECRET // Get this from Stripe CLI or Dashboard
+        //         );
+        //         console.log('✓ Event verified successfully');
+        //     } catch (err) {
+        //         console.error(`✗ Webhook Signature Verification Failed:`, err.message);
+        //         return res.status(400).send(`Webhook Error: ${err.message}`);
+        //     }
 
-            console.log('Event type:', event.type);
-            console.log('Event session/object id:', event.data.object.id);
-            
-            // Handle the specific successful payment event
-            if (event.type === 'checkout.session.completed') {
-                console.log('✓ Processing checkout.session.completed event');
-                const session = event.data.object;
+        //     console.log('Event type:', event.type);
+        //     console.log('Event session/object id:', event.data.object.id);
 
-                // Extract the variables we stashed in metadata earlier
-                const { userId, buyerName, buyerEmail, bookTitle, bookId } = session.metadata;
-                console.log('Metadata:', { userId, buyerName, buyerEmail, bookTitle, bookId });
-                const amountPaid = session.amount_total / 100; // Stripe provides this in cents (e.g., 1000 = $10.00)
+        //     // Handle the specific successful payment event
+        //     if (event.type === 'checkout.session.completed') {
+        //         console.log('✓ Processing checkout.session.completed event');
+        //         const session = event.data.object;
 
-                try {
-                    const newTransaction = {
-                        buyerName: buyerName,
-                        buyerEmail: buyerEmail,
-                        bookTitle: bookTitle,
-                        amount: amountPaid,
-                        paymentDate: new Date(),
-                        type: 'purchase',
-                        buyerId: userId,
-                        bookId: bookId,
-                        stripeSessionId: session.id,
-                    };
-                    console.log('Attempting to save transaction:', newTransaction);
-                    
-                    const result = await transactionCollection.insertOne(newTransaction);
-                    console.log(`✓ Transaction saved successfully for Book ID: ${bookId}, Tx ID: ${result.insertedId}`);
+        //         // Extract the variables we stashed in metadata earlier
+        //         const { userId, buyerName, buyerEmail, bookTitle, bookId } = session.metadata;
+        //         console.log('Metadata:', { userId, buyerName, buyerEmail, bookTitle, bookId });
+        //         const amountPaid = session.amount_total / 100; // Stripe provides this in cents (e.g., 1000 = $10.00)
 
-                    // OPTIONAL: Update user collection here to give them instant library access
-                    // await userCollection.updateOne({ _id: new ObjectId(userId) }, { $push: { purchasedBooks: bookId } });
+        //         try {
+        //             const newTransaction = {
+        //                 buyerName: buyerName,
+        //                 bookTitle: bookTitle,
+        //                 type: 'purchase',
+        //                 bookId: bookId,
 
-                } catch (dbError) {
-                    console.error("✗ Failed to insert transaction into DB:", dbError);
-                    // Return a 500 so Stripe knows your server failed and will retry sending the event
-                    return res.status(500).send("Database insertion failed");
-                }
-            } else {
-                console.log(`Webhook event type '${event.type}' - no action needed`);
-            }
+        //                 buyerEmail: buyerEmail,
+        //                 amount: amountPaid,
+        //                 paymentDate: new Date(),
+        //                 buyerId: userId,
+        //                 stripeSessionId: session.id,
+        //             };
+        //             console.log('Attempting to save transaction:', newTransaction);
 
-            // Return a 200 response to Stripe to acknowledge receipt of the event
-            console.log('=== WEBHOOK COMPLETE ===\n');
-            res.json({ received: true });
-        });
+        //             const result = await transactionCollection.insertOne(newTransaction);
+        //             console.log(`✓ Transaction saved successfully for Book ID: ${bookId}, Tx ID: ${result.insertedId}`);
 
+        //             // OPTIONAL: Update user collection here to give them instant library access
+        //             // await userCollection.updateOne({ _id: new ObjectId(userId) }, { $push: { purchasedBooks: bookId } });
+
+        //         } catch (dbError) {
+        //             console.error("✗ Failed to insert transaction into DB:", dbError);
+        //             // Return a 500 so Stripe knows your server failed and will retry sending the event
+        //             return res.status(500).send("Database insertion failed");
+        //         }
+        //     } else {
+        //         console.log(`Webhook event type '${event.type}' - no action needed`);
+        //     }
+
+        //     // Return a 200 response to Stripe to acknowledge receipt of the event
+        //     console.log('=== WEBHOOK COMPLETE ===\n');
+        //     res.json({ received: true });
+        // });
+
+        
+        
         // test user preference [private]
         app.patch('/api/user/preference', verifyToken, async (req, res) => {
             // console.log('server body: ', req.body)
