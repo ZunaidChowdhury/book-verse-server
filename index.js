@@ -1,5 +1,5 @@
-// import dns from "node:dns/promises";
-// dns.setServers(["8.8.8.8", "1.1.1.1"]);
+import dns from "node:dns/promises";
+dns.setServers(["8.8.8.8", "1.1.1.1"]);
 
 import express from "express";
 import cors from "cors";
@@ -100,7 +100,7 @@ async function run() {
         const bookCollection = database.collection("book");
         const transactionCollection = database.collection("transaction");
 
-        // STRIPE WEBHOOK ENDPOINT
+        // STRIPE WEBHOOK ENDPOINT____________________________________________________________
         app.post('/api/webhooks/stripe', async (req, res) => {
             const sig = req.headers['stripe-signature'];
             let event;
@@ -124,17 +124,18 @@ async function run() {
                 const userEmail = session.metadata?.userEmail;
                 const bookId = session.metadata?.bookId;
                 const bookTitle = session.metadata?.bookTitle;
-
+                const writerId = session.metadata?.writerId;
+                // console.log('Stripe webhook session metadata 2:', session.metadata);
                 const transactionDoc = {
                     stripeSessionId: session.id,
                     paymentIntentId: session.payment_intent,
-                    
+
                     userId,
                     userName,
                     userEmail,
                     bookId,
                     bookTitle,
-
+                    writerId,
                     amountPaid: session.amount_total / 100,
                     type: 'purchase',
                     currency: session.currency,
@@ -142,7 +143,7 @@ async function run() {
                     purchasedAt: new Date(),
 
                 };
-
+                // console.log('Stripe webhook session metadata 3:', session.metadata);
                 try {
                     const result = await transactionCollection.insertOne(transactionDoc);
                     console.log(`Transaction successfully recorded in MongoDB: ${result.insertedId}`);
@@ -157,6 +158,7 @@ async function run() {
 
 
 
+        // PUBLIC ENDPOINT____________________________________________________________
         // get featured books [public]______________________________________________
         app.get('/api/featured-books', async (req, res) => {
             const cursor = bookCollection.find({ featuredPosition: { $gte: 1, $lte: 8 } }).sort({ featuredPosition: 1 });
@@ -300,9 +302,13 @@ async function run() {
             res.send(book);
         });
 
-        // writer_____________________________________________________________________
+
+
+
+        // WRITER PUBLIC ENDPOINT____________________________________________________________
         // post a book [protected, writer only]
         app.post('/api/books', verifyToken, verifyWriter, async (req, res) => {
+            console.log('server/post/book/body: ', req.body)
             try {
                 const { title, description, content, image, price, genres } = req.body;
                 const { name: writerName, id: writerId } = req.user;
@@ -357,27 +363,9 @@ async function run() {
                 console.error("Stripe Automate Error:", error);
                 res.status(500).send({ success: false, error: error.message });
             }
-        });
+        })
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        // _____________________________________________________________________
-        // WRITER ENDPOINTS
-        // _____________________________________________________________________
-
-        // 1. Get own ebooks (Manage Ebooks list)
+        // Get own ebooks (Manage Ebooks list)
         app.get('/api/writer/my-books', verifyToken, verifyWriter, async (req, res) => {
             try {
                 // Safely fetch writer identifier from verified JWT payload
@@ -395,8 +383,8 @@ async function run() {
             }
         });
 
-        // 2. Update Ebook (Edit Ebook data or visibility status)
-        app.patch('/api/writer/books/:bookId', verifyToken, verifyWriter, async (req, res) => {
+        // Update Ebook (Edit Ebook data or visibility status)
+        app.patch('/api/books/:bookId', verifyToken, async (req, res) => {
             try {
                 const bookId = req.params.bookId;
                 const writerId = req.user.id;
@@ -426,7 +414,7 @@ async function run() {
             }
         });
 
-        // 3. Delete Ebook
+        // Delete Ebook
         app.delete('/api/writer/books/:bookId', verifyToken, verifyWriter, async (req, res) => {
             try {
                 const bookId = req.params.bookId;
@@ -446,70 +434,51 @@ async function run() {
             }
         });
 
-        // 4. Get Writer Sales History
+        // Get Writer Sales History
         app.get('/api/writer/sales-history', verifyToken, verifyWriter, async (req, res) => {
+
+            console.log('Received request for sales history from writer:', req.user.id);
             try {
                 const writerId = req.user.id;
-                const salesCollection = database.collection("sales"); // Setup context for sales tracking
 
-                // Aggregate sales and resolve document joins natively
-                const salesPipeline = [
-                    { $match: { writerId: writerId } },
-                    {
-                        $lookup: {
-                            from: "user",
-                            localField: "buyerId",
-                            foreignField: "_id", // standard lookup or matching fallback string
-                            as: "buyerInfo"
-                        }
-                    },
-                    { $unwind: { path: "$buyerInfo", preserveNullAndEmptyArrays: true } },
-                    {
-                        $project: {
-                            _id: 1,
-                            bookTitle: 1,
-                            purchaseDate: 1,
-                            amount: 1,
-                            buyerName: { $ifNull: ["$buyerInfo.name", "$buyerEmail"] }
-                        }
-                    },
-                    { $sort: { purchaseDate: -1 } }
-                ];
+                console.log('Fetching sales history for writer:', writerId);
+                // Query transaction collection by writerId
+                const transactions = await transactionCollection
+                    .find({ writerId: writerId, type: 'purchase' })
+                    .sort({ purchasedAt: -1 })
+                    .toArray();
 
-                const salesHistory = await salesCollection.aggregate(salesPipeline).toArray();
-                res.send(salesHistory);
+                res.send(transactions);
             } catch (error) {
                 console.error("Error fetching sales history:", error);
                 res.status(500).send({ error: true, message: error.message });
             }
         });
 
-        // _____________________________________________________________________
+
         // READER / PUBLIC WISHLIST ENDPOINTS
         // _____________________________________________________________________
 
-        // 5. Get logged-in user's wishlist details (Gallery mapping)
+        // WISHLIST - PROTECTED, Get logged-in user's wishlist details (Gallery mapping)
         app.get('/api/wishlist', verifyToken, async (req, res) => {
             try {
                 const userId = req.user.id;
-                const wishlistCollection = database.collection("wishlist");
 
-                // Aggregate to pull complete book objects straight into the wishlist payload
-                const pipeline = [
-                    { $match: { userId: userId } },
-                    {
-                        $lookup: {
-                            from: "book",
-                            localField: "bookId",
-                            foreignField: "_id",
-                            as: "bookDetails"
-                        }
-                    },
-                    { $unwind: "$bookDetails" },
-                    { $replaceRoot: { newRoot: "$bookDetails" } } // Directly gives an array of book models
-                ];
+                // Find user and get wishlist array
+                const user = await userCollection.findOne({
+                    _id: new ObjectId(userId)
+                });
 
-                const wishlistBooks = await wishlistCollection.aggregate(pipeline).toArray();
+                if (!user || !user.wishlist || user.wishlist.length === 0) {
+                    return res.send([]);
+                }
+
+                // Convert wishlist IDs to ObjectIds and fetch full book details
+                const wishlistBookIds = user.wishlist.map(id => new ObjectId(id));
+                const wishlistBooks = await bookCollection.find({
+                    _id: { $in: wishlistBookIds }
+                }).toArray();
+
                 res.send(wishlistBooks);
             } catch (error) {
                 console.error("Error fetching wishlist:", error);
@@ -517,27 +486,94 @@ async function run() {
             }
         });
 
+        // Check if a book is in user's wishlist
+        app.get('/api/wishlist/check/:bookId', verifyToken, async (req, res) => {
+            try {
+                const userId = req.user.id;
+                const { bookId } = req.params;
+
+                const user = await userCollection.findOne({
+                    _id: new ObjectId(userId)
+                });
+
+                const isWishlisted = user?.wishlist?.includes(bookId) || false;
+
+                res.send({
+                    isWishlisted
+                });
+            } catch (error) {
+                console.error("Error checking wishlist:", error);
+                res.status(500).send({ error: true, message: error.message });
+            }
+        });
+
+        // Add book to wishlist
+        app.post('/api/wishlist', verifyToken, async (req, res) => {
+            try {
+                const userId = req.user.id;
+                const { bookId } = req.body;
+
+                if (!bookId) {
+                    return res.status(400).send({ error: true, message: 'bookId is required' });
+                }
+
+                const user = await userCollection.findOne({
+                    _id: new ObjectId(userId)
+                });
+
+                if (user?.wishlist?.includes(bookId)) {
+                    return res.status(400).send({ error: true, message: 'Book already in wishlist' });
+                }
+
+                // Add bookId to wishlist array if it doesn't exist
+                const result = await userCollection.updateOne(
+                    { _id: new ObjectId(userId) },
+                    { $push: { wishlist: bookId } }
+                );
+
+                if (result.modifiedCount === 0) {
+                    return res.status(404).send({ error: true, message: 'User not found' });
+                }
+
+                res.status(201).send({
+                    message: 'Book added to wishlist successfully'
+                });
+            } catch (error) {
+                console.error("Error adding to wishlist:", error);
+                res.status(500).send({ error: true, message: error.message });
+            }
+        });
+
+        // Remove book from wishlist
+        app.delete('/api/wishlist/:bookId', verifyToken, async (req, res) => {
+            try {
+                const userId = req.user.id;
+                const { bookId } = req.params;
+
+                const result = await userCollection.updateOne(
+                    { _id: new ObjectId(userId) },
+                    { $pull: { wishlist: bookId } }
+                );
+
+                if (result.matchedCount === 0) {
+                    return res.status(404).send({ error: true, message: 'User not found' });
+                }
+
+                res.send({ message: 'Book removed from wishlist successfully' });
+            } catch (error) {
+                console.error("Error removing from wishlist:", error);
+                res.status(500).send({ error: true, message: error.message });
+            }
+        });
 
 
 
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-        // reader______________________________________________________________________________________
+        // READER PUBLIC ENDPOINT____________________________________________________________
         app.post('/api/checkout/create-session', verifyToken, verifyReader, async (req, res) => {
-            console.log('Received checkout session request with body:', req.body);
+            // console.log('Received checkout session request with body:', req.body);
             try {
                 const { bookId } = req.body;
 
@@ -545,7 +581,7 @@ async function run() {
                 const book = await bookCollection.findOne({ _id: new ObjectId(bookId) });
 
                 if (!book || !book.stripePriceId) {
-                    console.log("Book not found or missing Stripe price association:", book);
+                    // console.log("Book not found or missing Stripe price association:", book);
                     return res.status(404).send({ error: "Missing automated Stripe price association." });
                 }
 
@@ -565,13 +601,14 @@ async function run() {
                         userEmail: req.user.email,
                         bookId: book._id.toString(),
                         bookTitle: book.title,
+                        writerId: book.writerId.toString(),
                         // amountPaid: book.title,
                     },
-
                     success_url: `${process.env.CLIENT_URL}/books/${bookId}?status=success`,
                     cancel_url: `${process.env.CLIENT_URL}/books/${bookId}?status=cancelled`,
                 });
-                console.log("Checkout session created:", session.url);
+                // console.log("Stripe checkout session metadata 1:", session.metadata);
+                // console.log("Checkout session created:", session.url);
                 res.send({ url: session.url });
             } catch (error) {
                 console.error("Error creating checkout session:", error);
@@ -649,8 +686,8 @@ async function run() {
         //     res.json({ received: true });
         // });
 
-        
-        
+
+
         // test user preference [private]
         app.patch('/api/user/preference', verifyToken, async (req, res) => {
             // console.log('server body: ', req.body)
@@ -672,6 +709,402 @@ async function run() {
             const cursor = userCollection.find();
             const result = await cursor.toArray();
             res.send(result);
+        });
+
+
+        // Get reader dashboard data
+        app.get('/api/reader/dashboard', verifyToken, verifyReader, async (req, res) => {
+            try {
+                const userId = req.user.id;
+
+                // Get total books purchased
+                const totalBooks = await transactionCollection.countDocuments({ userId, type: 'purchase' });
+
+                // Get total spent
+                const transactions = await transactionCollection.find({ userId, type: 'purchase' }).toArray();
+                const totalSpent = transactions.reduce((sum, t) => sum + (t.amountPaid || 0), 0);
+
+                // Get wishlist count
+                const user = await userCollection.findOne({ _id: new ObjectId(userId) });
+                const wishlistCount = user?.wishlist?.length || 0;
+
+                res.send({
+                    totalBooks,
+                    totalSpent: totalSpent.toFixed(2),
+                    wishlistCount,
+                    recentBooks: transactions.slice(0, 5)
+                });
+            } catch (error) {
+                console.error('Error fetching reader dashboard:', error);
+                res.status(500).json({ message: 'Failed to fetch reader dashboard' });
+            }
+        });
+
+        // Get writer dashboard data
+        app.get('/api/writer/dashboard', verifyToken, verifyWriter, async (req, res) => {
+            try {
+                const writerId = req.user.id;
+
+                // Get total books published
+                const totalBooks = await bookCollection.countDocuments({ writerId });
+
+                // Get total sales from transactions
+                const sales = await transactionCollection.find({ writerId, type: 'purchase' }).toArray();
+                const totalSales = sales.length;
+                const totalRevenue = sales.reduce((sum, t) => sum + (t.amountPaid || 0), 0);
+
+                res.send({
+                    totalBooks,
+                    totalSales,
+                    totalRevenue: totalRevenue.toFixed(2),
+                    recentSales: sales.slice(0, 5)
+                });
+            } catch (error) {
+                console.error('Error fetching writer dashboard:', error);
+                res.status(500).json({ message: 'Failed to fetch writer dashboard' });
+            }
+        });
+
+
+        // Get purchase history for reader
+        app.get('/api/reader/purchase-history', verifyToken, verifyReader, async (req, res) => {
+            try {
+                const userId = req.user.id;
+                const purchases = await transactionCollection
+                    .find({ userId: userId, type: 'purchase' })
+                    .sort({ purchasedAt: -1 })
+                    .toArray();
+
+                // Fetch book details for each purchase
+                const enrichedPurchases = await Promise.all(
+                    purchases.map(async (purchase) => {
+                        const book = await bookCollection.findOne({ _id: new ObjectId(purchase.bookId) });
+                        return {
+                            ...purchase,
+                            title: book?.title || purchase.bookTitle,
+                            writerName: book?.writerName,
+                            price: book?.price || purchase.amountPaid,
+                            visibility: book?.visibility,
+                            image: book?.image
+                        };
+                    })
+                );
+
+                res.send(enrichedPurchases);
+            } catch (error) {
+                console.error('Error fetching purchase history:', error);
+                res.status(500).json({ message: 'Failed to fetch purchase history' });
+            }
+        });
+
+        // Get purchased books for reader
+        app.get('/api/reader/purchased-books', verifyToken, verifyReader, async (req, res) => {
+            try {
+                const userId = req.user.id;
+                const purchases = await transactionCollection
+                    .find({ userId: userId, type: 'purchase' })
+                    .toArray();
+
+                const bookIds = purchases.map(p => new ObjectId(p.bookId));
+                const books = await bookCollection
+                    .find({ _id: { $in: bookIds } })
+                    .toArray();
+
+                res.send(books);
+            } catch (error) {
+                console.error('Error fetching purchased books:', error);
+                res.status(500).json({ message: 'Failed to fetch purchased books' });
+            }
+        });
+
+        // Get reader's wishlist (already exists, but ensuring it's here)
+        app.get('/api/reader/wishlist', verifyToken, verifyReader, async (req, res) => {
+            try {
+                const userId = req.user.id;
+                const result = await wishlistCollection
+                    .aggregate([
+                        { $match: { userId: new ObjectId(userId) } },
+                        {
+                            $lookup: {
+                                from: 'book',
+                                localField: 'bookId',
+                                foreignField: '_id',
+                                as: 'bookDetails'
+                            }
+                        },
+                        { $unwind: '$bookDetails' },
+                        {
+                            $project: {
+                                _id: '$bookDetails._id',
+                                title: '$bookDetails.title',
+                                author: '$bookDetails.author',
+                                price: '$bookDetails.price',
+                                coverImage: '$bookDetails.coverImage',
+                                isPublished: '$bookDetails.isPublished'
+                            }
+                        }
+                    ])
+                    .toArray();
+
+                res.send(result);
+            } catch (error) {
+                console.error('Error fetching wishlist:', error);
+                res.status(500).json({ message: 'Failed to fetch wishlist' });
+            }
+        });
+
+        // Get reader profile
+        app.get('/api/reader/profile', verifyToken, verifyReader, async (req, res) => {
+            try {
+                const userId = req.user.id;
+                const user = await userCollection.findOne({ _id: new ObjectId(userId) });
+
+                if (!user) {
+                    return res.status(404).json({ message: 'User not found' });
+                }
+
+                res.send({
+                    _id: user._id,
+                    name: user.name,
+                    email: user.email,
+                    image: user.image,
+                    bio: user.bio
+                });
+            } catch (error) {
+                console.error('Error fetching profile:', error);
+                res.status(500).json({ message: 'Failed to fetch profile' });
+            }
+        });
+
+        // Update reader profile
+        app.patch('/api/reader/profile', verifyToken, verifyReader, async (req, res) => {
+            try {
+                const userId = req.user.id;
+                const updateData = req.body;
+
+                // Only allow these fields to be updated
+                const allowedFields = { name: 1, bio: 1, image: 1 };
+                const filteredData = {};
+                Object.keys(updateData).forEach(key => {
+                    if (allowedFields[key]) {
+                        filteredData[key] = updateData[key];
+                    }
+                });
+
+                const result = await userCollection.updateOne(
+                    { _id: new ObjectId(userId) },
+                    { $set: filteredData }
+                );
+
+                res.send(result);
+            } catch (error) {
+                console.error('Error updating profile:', error);
+                res.status(500).json({ message: 'Failed to update profile' });
+            }
+        });
+
+        
+        // ==================== ADMIN ENDPOINTS ====================
+
+        // Get all users (admin)
+        app.get('/api/admin/users', verifyToken, verifyAdmin, async (req, res) => {
+            try {
+                const users = await userCollection
+                    .find({})
+                    .project({ password: 0 })
+                    .toArray();
+
+                res.send(users);
+            } catch (error) {
+                console.error('Error fetching users:', error);
+                res.status(500).json({ message: 'Failed to fetch users' });
+            }
+        });
+
+        // Update user role (admin)
+        app.patch('/api/admin/users/:userId/role', verifyToken, verifyAdmin, async (req, res) => {
+            try {
+                const { userId } = req.params;
+                const { role } = req.body;
+
+                if (!['reader', 'writer', 'admin'].includes(role)) {
+                    return res.status(400).json({ message: 'Invalid role' });
+                }
+
+                const result = await userCollection.updateOne(
+                    { _id: new ObjectId(userId) },
+                    { $set: { role } }
+                );
+
+                res.send(result);
+            } catch (error) {
+                console.error('Error updating user role:', error);
+                res.status(500).json({ message: 'Failed to update user role' });
+            }
+        });
+
+        // Delete user (admin)
+        app.delete('/api/admin/users/:userId', verifyToken, verifyAdmin, async (req, res) => {
+            try {
+                const { userId } = req.params;
+
+                const result = await userCollection.deleteOne(
+                    { _id: new ObjectId(userId) }
+                );
+
+                res.send(result);
+            } catch (error) {
+                console.error('Error deleting user:', error);
+                res.status(500).json({ message: 'Failed to delete user' });
+            }
+        });
+
+        // Get all books (admin)
+        app.get('/api/admin/books', verifyToken, verifyAdmin, async (req, res) => {
+            try {
+                const books = await bookCollection
+                    .find({})
+                    .sort({ createdAt: -1 })
+                    .toArray();
+
+                res.send(books);
+            } catch (error) {
+                console.error('Error fetching books:', error);
+                res.status(500).json({ message: 'Failed to fetch books' });
+            }
+        });
+
+        // Update book status (admin)
+        app.patch('/api/admin/books/:bookId/status', verifyToken, verifyAdmin, async (req, res) => {
+            try {
+                const { bookId } = req.params;
+                const { visibility } = req.body;
+
+                const result = await bookCollection.updateOne(
+                    { _id: new ObjectId(bookId) },
+                    { $set: { visibility } }
+                );
+
+                res.send(result);
+            } catch (error) {
+                console.error('Error updating book status:', error);
+                res.status(500).json({ message: 'Failed to update book status' });
+            }
+        });
+
+        // Delete book (admin)
+        app.delete('/api/admin/books/:bookId', verifyToken, verifyAdmin, async (req, res) => {
+            try {
+                const { bookId } = req.params;
+
+                const result = await bookCollection.deleteOne(
+                    { _id: new ObjectId(bookId) }
+                );
+
+                res.send(result);
+            } catch (error) {
+                console.error('Error deleting book:', error);
+                res.status(500).json({ message: 'Failed to delete book' });
+            }
+        });
+
+        // Get all transactions (admin)
+        app.get('/api/admin/transactions', verifyToken, verifyAdmin, async (req, res) => {
+            try {
+                const transactions = await transactionCollection
+                    .find({})
+                    .sort({ purchasedAt: -1 })
+                    .toArray();
+
+                res.send(transactions);
+            } catch (error) {
+                console.error('Error fetching transactions:', error);
+                res.status(500).json({ message: 'Failed to fetch transactions' });
+            }
+        });
+
+        // Get dashboard analytics (admin)
+        app.get('/api/admin/analytics', verifyToken, verifyAdmin, async (req, res) => {
+            try {
+                const totalUsers = await userCollection.countDocuments({ role: 'reader' });
+                const totalWriters = await userCollection.countDocuments({ role: 'writer' });
+
+                const sales = await transactionCollection
+                    .find({ type: 'purchase' })
+                    .toArray();
+
+                const totalBooksSold = sales.length;
+                const totalRevenue = sales.reduce((sum, t) => sum + (t.amountPaid || 0), 0);
+
+                res.send({
+                    totalUsers,
+                    totalWriters,
+                    totalBooksSold,
+                    totalRevenue
+                });
+            } catch (error) {
+                console.error('Error fetching analytics:', error);
+                res.status(500).json({ message: 'Failed to fetch analytics' });
+            }
+        });
+
+        // Get monthly sales data (admin)
+        app.get('/api/admin/analytics/monthly-sales', verifyToken, verifyAdmin, async (req, res) => {
+            try {
+                const sales = await transactionCollection
+                    .aggregate([
+                        { $match: { type: 'purchase' } },
+                        {
+                            $group: {
+                                _id: {
+                                    year: { $year: '$purchasedAt' },
+                                    month: { $month: '$purchasedAt' }
+                                },
+                                sales: { $sum: '$amountPaid' }
+                            }
+                        },
+                        { $sort: { '_id.year': -1, '_id.month': -1 } }
+                    ])
+                    .toArray();
+
+                const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+                const formattedSales = sales.map(item => ({
+                    month: `${monthNames[item._id.month - 1]} ${item._id.year}`,
+                    sales: item.sales
+                }));
+
+                res.send(formattedSales);
+            } catch (error) {
+                console.error('Error fetching monthly sales:', error);
+                res.status(500).json({ message: 'Failed to fetch monthly sales' });
+            }
+        })
+
+        // Get books by genre (admin)
+        app.get('/api/admin/analytics/books-by-genre', verifyToken, verifyAdmin, async (req, res) => {
+            try {
+                const booksByGenre = await bookCollection
+                    .aggregate([
+                        {
+                            $group: {
+                                _id: '$genre',
+                                count: { $sum: 1 }
+                            }
+                        },
+                        { $sort: { count: -1 } }
+                    ])
+                    .toArray();
+
+                const formattedGenres = booksByGenre.map(item => ({
+                    genre: item._id || 'Unknown',
+                    count: item.count
+                }));
+
+                res.send(formattedGenres);
+            } catch (error) {
+                console.error('Error fetching books by genre:', error);
+                res.status(500).json({ message: 'Failed to fetch books by genre' });
+            }
         });
 
         // app.get('/protected-message', verifyToken, async (req, res) => {
