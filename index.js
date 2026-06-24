@@ -99,6 +99,7 @@ async function run() {
         const userCollection = database.collection("user");
         const bookCollection = database.collection("book");
         const transactionCollection = database.collection("transaction");
+        const bookContentCollection = database.collection("bookContent");
 
         // STRIPE WEBHOOK ENDPOINT____________________________________________________________
         app.post('/api/webhooks/stripe', async (req, res) => {
@@ -145,10 +146,18 @@ async function run() {
                 };
                 // console.log('Stripe webhook session metadata 3:', session.metadata);
                 try {
-                    const result = await transactionCollection.insertOne(transactionDoc);
-                    console.log(`Transaction successfully recorded in MongoDB: ${result.insertedId}`);
+                    // Save transaction
+                    const transactionResult = await transactionCollection.insertOne(transactionDoc);
+                    console.log(`Transaction successfully recorded in MongoDB: ${transactionResult.insertedId}`);
+
+                    // Update book soldQuantity
+                    const bookUpdateResult = await bookCollection.updateOne(
+                        { _id: new ObjectId(bookId) },
+                        { $inc: { soldQuantity: 1 } }
+                    );
+                    console.log(`Book soldQuantity updated: ${bookUpdateResult.modifiedCount} document(s) modified`);
                 } catch (dbError) {
-                    console.error("Failed to save transaction to MongoDB:", dbError);
+                    console.error("Failed to save transaction or update book:", dbError);
                 }
             }
 
@@ -353,6 +362,17 @@ async function run() {
                 const result = await bookCollection.insertOne(newBookDoc);
                 // console.log("MongoDB Insert Result:", result);
 
+                // 6. Save book content to separate bookContent collection
+                if (content) {
+                    const bookContentDoc = {
+                        bookId: result.insertedId.toString(),
+                        content: content,
+                        createdAt: new Date(),
+                        updatedAt: new Date()
+                    };
+                    await bookContentCollection.insertOne(bookContentDoc);
+                }
+
                 res.status(201).send({
                     success: true,
                     insertedId: result.insertedId,
@@ -451,6 +471,95 @@ async function run() {
                 res.send(transactions);
             } catch (error) {
                 console.error("Error fetching sales history:", error);
+                res.status(500).send({ error: true, message: error.message });
+            }
+        });
+
+        // Check if reader purchased a book [protected]
+        app.get('/api/reader/purchased-check/:bookId', verifyToken, verifyReader, async (req, res) => {
+            try {
+                const userId = req.user.id;
+                const bookId = req.params.bookId;
+
+                const purchase = await transactionCollection.findOne({
+                    userId: userId,
+                    bookId: bookId,
+                    type: 'purchase'
+                });
+
+                res.send({ isPurchased: !!purchase });
+            } catch (error) {
+                console.error("Error checking purchase:", error);
+                res.status(500).send({ error: true, message: error.message });
+            }
+        });
+
+        // Get book content [protected, reader only - after purchase]
+        app.get('/api/books/:bookId/content', verifyToken, verifyReader, async (req, res) => {
+            try {
+                const userId = req.user.id;
+                const bookId = req.params.bookId;
+
+                // Check if user purchased the book
+                const purchase = await transactionCollection.findOne({
+                    userId: userId,
+                    bookId: bookId,
+                    type: 'purchase'
+                });
+
+                if (!purchase) {
+                    return res.status(403).send({ error: true, message: "You must purchase this book to access its content" });
+                }
+
+                // Get book content
+                const bookContent = await bookContentCollection.findOne({
+                    bookId: bookId
+                });
+
+                if (!bookContent) {
+                    return res.status(404).send({ error: true, message: "Book content not found" });
+                }
+
+                res.send(bookContent);
+            } catch (error) {
+                console.error("Error fetching book content:", error);
+                res.status(500).send({ error: true, message: error.message });
+            }
+        });
+
+        // Update book content [protected, writer only]
+        app.post('/api/books/:bookId/content', verifyToken, verifyWriter, async (req, res) => {
+            try {
+                const bookId = req.params.bookId;
+                const writerId = req.user.id;
+                const { content } = req.body;
+
+                // Verify book belongs to writer
+                const book = await bookCollection.findOne({
+                    _id: new ObjectId(bookId),
+                    writerId: writerId
+                });
+
+                if (!book) {
+                    return res.status(403).send({ error: true, message: "Unauthorized" });
+                }
+
+                // Update or insert book content
+                const result = await bookContentCollection.updateOne(
+                    { bookId: bookId },
+                    {
+                        $set: {
+                            bookId: bookId,
+                            content: content,
+                            updatedAt: new Date()
+                        }
+                    },
+                    { upsert: true }
+                );
+
+                res.send({ success: true, result });
+            } catch (error) {
+                console.error("Error updating book content:", error);
                 res.status(500).send({ error: true, message: error.message });
             }
         });
