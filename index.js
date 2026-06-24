@@ -319,7 +319,8 @@ async function run() {
         app.post('/api/books', verifyToken, verifyWriter, async (req, res) => {
             console.log('server/post/book/body: ', req.body)
             try {
-                const { title, description, content, image, price, genres } = req.body;
+                // Separate content from book metadata so content isn't stored in the main book collection
+                const { content, price, title, description, image } = req.body;
                 const { name: writerName, id: writerId } = req.user;
 
                 // 1. Convert price to cents safely ($14.99 -> 1499)
@@ -340,9 +341,10 @@ async function run() {
                     currency: 'usd',
                 });
 
-                // 4. Prepare your complete document object including the native Stripe track IDs
+                // 4. Prepare your complete document object excluding `content`
+                const { content: _c, ...rest } = req.body;
                 const newBookDoc = {
-                    ...req.body,
+                    ...rest,
                     featuredPosition: 0,
                     writerName,
                     writerId,
@@ -350,19 +352,17 @@ async function run() {
                     rating: 5.0,
                     soldQuantity: 0,
 
-                    stripeProductId: stripeProduct.id,  // <-- Saved for reference
-                    stripePriceId: stripePrice.id,      // <-- Saved for purchase checkout
+                    stripeProductId: stripeProduct.id,
+                    stripePriceId: stripePrice.id,
 
                     createdAt: new Date(),
                     updatedAt: new Date()
                 };
 
-                // console.log("New Book Document to Insert:", newBookDoc);
-                // 5. Insert directly into your plain MongoDB collection
+                // 5. Insert into book collection (no `content` field)
                 const result = await bookCollection.insertOne(newBookDoc);
-                // console.log("MongoDB Insert Result:", result);
 
-                // 6. Save book content to separate bookContent collection
+                // 6. Save book content to separate bookContent collection (if provided)
                 if (content) {
                     const bookContentDoc = {
                         bookId: result.insertedId.toString(),
@@ -405,29 +405,58 @@ async function run() {
 
         // Update Ebook (Edit Ebook data or visibility status)
         app.patch('/api/books/:bookId', verifyToken, async (req, res) => {
+            console.log('Received update request for bookId:', req.params.bookId, 'with updates:', req.body);
             try {
                 const bookId = req.params.bookId;
                 const writerId = req.user.id;
                 const updates = req.body;
                 // console.log("Received update request for bookId:", bookId, "with updates:", updates);
-
                 // Strip out restricted fields to prevent tampering
                 delete updates._id;
                 delete updates.writerId;
                 delete updates.writerEmail;
 
-                // Ensure the book belongs to the requesting writer
-                const filter = { _id: new ObjectId(bookId), writerId: writerId };
-                const updateDoc = { $set: updates };
-
-                // console.log("Filter for update:", filter, "Update document:", updateDoc);
-                const result = await bookCollection.updateOne(filter, updateDoc);
-
-                if (result.matchedCount === 0) {
-                    return res.status(404).send({ error: true, message: "Book not found or unauthorized" });
+                // If content is present in updates, move it to bookContent collection and remove from updates
+                const contentUpdate = updates.content;
+                if (typeof contentUpdate !== 'undefined') {
+                    delete updates.content; // remove from book metadata
                 }
 
-                res.send({ success: true, message: "Book updated successfully", result });
+                if (req.user.role === 'admin') {
+                    const filter = { _id: new ObjectId(bookId)};
+                    const updateDoc = { $set: { ...updates, updatedAt: new Date() } };
+
+                    const result = await bookCollection.updateOne(filter, updateDoc);
+
+                    if (result.matchedCount === 0) {
+                        return res.status(404).send({ error: true, message: "Book did not update." });
+                    }
+
+                    res.send({ success: true, message: "Book updated successfully", result });
+                }
+                else if (req.user.role === 'writer') {
+                    // Ensure the book belongs to the requesting writer
+                    const filter = { _id: new ObjectId(bookId), writerId: writerId };
+                    const updateDoc = { $set: { ...updates, updatedAt: new Date() } };
+
+                    const result = await bookCollection.updateOne(filter, updateDoc);
+
+                    if (result.matchedCount === 0) {
+                        return res.status(404).send({ error: true, message: "Book not found or unauthorized" });
+                    }
+
+                    // Update or insert book content
+                    if (typeof contentUpdate !== 'undefined') {
+                        await bookContentCollection.updateOne(
+                            { bookId: bookId },
+                            { $set: { content: contentUpdate, updatedAt: new Date(), bookId: bookId } },
+                            { upsert: true }
+                        );
+                    }
+
+                    res.send({ success: true, message: "Book updated successfully", result });
+                }
+
             } catch (error) {
                 console.error("Error updating book:", error);
                 res.status(500).send({ error: true, message: error.message });
@@ -445,6 +474,13 @@ async function run() {
 
                 if (result.deletedCount === 0) {
                     return res.status(404).send({ error: true, message: "Book not found or unauthorized" });
+                }
+
+                // Remove book content from bookContent collection as well
+                try {
+                    await bookContentCollection.deleteOne({ bookId: bookId });
+                } catch (err) {
+                    console.error('Failed to delete book content for bookId:', bookId, err);
                 }
 
                 res.send({ success: true, message: "Book deleted successfully", result });
@@ -495,7 +531,8 @@ async function run() {
         });
 
         // Get book content [protected, reader only - after purchase]
-        app.get('/api/books/:bookId/content', verifyToken, verifyReader, async (req, res) => {
+        app.get('/api/books/:bookId/content', verifyToken, async (req, res) => {
+
             try {
                 const userId = req.user.id;
                 const bookId = req.params.bookId;
@@ -506,11 +543,14 @@ async function run() {
                     bookId: bookId,
                     type: 'purchase'
                 });
-
-                if (!purchase) {
+                if (req.user.role === 'reader' && !purchase) {
                     return res.status(403).send({ error: true, message: "You must purchase this book to access its content" });
                 }
 
+                const book = await bookCollection.findOne({ _id: new ObjectId(bookId) });
+                if (req.user.role === 'writer' && req.user.id !== book?.writerId) {
+                    return res.status(403).send({ error: true, message: "You are not the owner of this book content" });
+                }
                 // Get book content
                 const bookContent = await bookContentCollection.findOne({
                     bookId: bookId
@@ -519,7 +559,6 @@ async function run() {
                 if (!bookContent) {
                     return res.status(404).send({ error: true, message: "Book content not found" });
                 }
-
                 res.send(bookContent);
             } catch (error) {
                 console.error("Error fetching book content:", error);
@@ -806,7 +845,7 @@ async function run() {
                 return res.status(400).json({ message: 'Unable to resolve user ID from token payload' });
             }
 
-            const updatedData = req.body;            
+            const updatedData = req.body;
             const result = await userCollection.updateOne({ _id: new ObjectId(userId) }, { $set: updatedData });
             res.send(result);
         });
@@ -1011,7 +1050,7 @@ async function run() {
             }
         });
 
-        
+
         // ==================== ADMIN ENDPOINTS ====================
 
         // Get all users (admin)
