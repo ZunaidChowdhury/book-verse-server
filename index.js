@@ -1230,11 +1230,25 @@ async function run() {
         // Get books by genre (admin)
         app.get('/api/admin/analytics/books-by-genre', verifyToken, verifyAdmin, async (req, res) => {
             try {
+                // books have `genres` as an array. unwind and count each genre occurrence.
                 const booksByGenre = await bookCollection
                     .aggregate([
+                        // ensure there is at least one genre; replace empty/null with ['Unknown']
+                        {
+                            $addFields: {
+                                genresArr: {
+                                    $cond: [
+                                        { $gt: [{ $size: { $ifNull: ['$genres', []] } }, 0] },
+                                        '$genres',
+                                        ['Unknown']
+                                    ]
+                                }
+                            }
+                        },
+                        { $unwind: '$genresArr' },
                         {
                             $group: {
-                                _id: '$genre',
+                                _id: '$genresArr',
                                 count: { $sum: 1 }
                             }
                         },
