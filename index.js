@@ -690,15 +690,14 @@ async function run() {
 
         // test user preference [private]
         app.patch('/api/user/preference', verifyToken, async (req, res) => {
-            // console.log('server body: ', req.body)
-            // console.log('verified user payload: ', req.user)
+
 
             const userId = req.user.id;
             if (!userId) {
                 return res.status(400).json({ message: 'Unable to resolve user ID from token payload' });
             }
 
-            const updatedData = req.body;
+            const updatedData = req.body;            
             const result = await userCollection.updateOne({ _id: new ObjectId(userId) }, { $set: updatedData });
             res.send(result);
         });
