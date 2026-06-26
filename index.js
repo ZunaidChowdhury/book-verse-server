@@ -180,26 +180,72 @@ async function run() {
         app.get('/api/top-writers', async (req, res) => {
             try {
                 const pipeline = [
-                    // Step 1: Filter to get only users who are writers
+                    // Group book stats by writer
                     {
-                        $match: { role: "writer" }
+                        $group: {
+                            _id: '$writerId',
+                            writerName: { $first: '$writerName' },
+                            booksCount: { $sum: 1 },
+                            sales: { $sum: '$soldQuantity' }
+                        }
                     },
-                    // Step 2: Sort by totalSales field in descending order (-1)
+                    // Lookup writer profile data from the user collection
                     {
-                        $sort: { totalSales: -1 }
+                        $lookup: {
+                            from: 'user',
+                            let: { writerId: '$_id' },
+                            pipeline: [
+                                {
+                                    $match: {
+                                        $expr: {
+                                            $eq: [{ $toString: '$_id' }, '$$writerId']
+                                        }
+                                    }
+                                },
+                                {
+                                    $project: {
+                                        name: 1,
+                                        image: 1,
+                                        role: 1,
+                                        socials: 1,
+                                        bio: 1
+                                    }
+                                }
+                            ],
+                            as: 'writerProfile'
+                        }
                     },
-                    // Step 3: Restrict the final array output to exactly 3 documents
+                    {
+                        $unwind: {
+                            path: '$writerProfile',
+                            preserveNullAndEmptyArrays: true
+                        }
+                    },
+                    {
+                        $project: {
+                            _id: '$_id',
+                            name: {
+                                $ifNull: ['$writerProfile.name', '$writerName']
+                            },
+                            image: '$writerProfile.image',
+                            role: '$writerProfile.role',
+                            socials: '$writerProfile.socials',
+                            booksCount: 1,
+                            sales: 1
+                        }
+                    },
+                    {
+                        $sort: { sales: -1 }
+                    },
                     {
                         $limit: 3
                     }
                 ];
 
-                // Execute the aggregation query on your collection
-                const result = await userCollection.aggregate(pipeline).toArray();
-
+                const result = await bookCollection.aggregate(pipeline).toArray();
                 res.send(result);
             } catch (error) {
-                console.error("Error fetching top writers:", error);
+                console.error('Error fetching top writers:', error);
                 res.status(500).send({ error: true, message: error.message });
             }
         });
@@ -403,6 +449,7 @@ async function run() {
             }
         });
 
+        // ADMIN OR OWN WRITER
         // Update Ebook (Edit Ebook data or visibility status)
         app.patch('/api/books/:bookId', verifyToken, async (req, res) => {
             console.log('Received update request for bookId:', req.params.bookId, 'with updates:', req.body);
@@ -1274,6 +1321,20 @@ async function run() {
 
 
         // });
+
+        app.get('/api/user/:userId', verifyToken, async (req, res) => {
+            try {
+                const { userId } = req.params;
+                const user = await userCollection.findOne({ _id: new ObjectId(userId) }, { projection: { password: 0 } });
+                if (!user) {
+                    return res.status(404).json({ message: 'User not found' });
+                }
+                res.json(user);
+            } catch (error) {
+                console.error('Error fetching user:', error);
+                res.status(500).json({ message: 'Failed to fetch user' });
+            }
+        });
 
         // Send a ping to confirm a successful connection
         // await client.db("admin").command({ ping: 1 });
