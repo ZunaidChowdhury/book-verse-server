@@ -276,11 +276,29 @@ async function run() {
                     ];
                 }
 
-                // Genre filter (support multiple genres)
+                // Genre filter (support multiple genres case-insensitively)
                 if (genres.trim()) {
+                    // Split incoming query but preserve casing patterns to parse correctly
                     const genreArray = genres.split(',').map(g => g.trim()).filter(Boolean);
+
                     if (genreArray.length > 0) {
-                        filter.genres = { $in: genreArray };
+                        // Map each requested genre text into a clean exact-match case-insensitive regex
+                        const caseInsensitiveQueries = genreArray.map(genre => ({
+                            genres: { $regex: `^${genre}$`, $options: 'i' }
+                        }));
+
+                        // Securely bind the conditions to your main filter payload wrapper object
+                        if (filter.$or) {
+                            // If the search filter already populated $or, use $and to merge genre rules
+                            filter.$and = [
+                                { $or: filter.$or },
+                                { $or: caseInsensitiveQueries }
+                            ];
+                            delete filter.$or; // Remove root $or to prevent conflict issues
+                        } else {
+                            // Standard placement if search query is blank
+                            filter.$or = caseInsensitiveQueries;
+                        }
                     }
                 }
 
@@ -353,8 +371,17 @@ async function run() {
         // get a book [public] 
         app.get('/api/books/:bookId', async (req, res) => {
             const bookId = req.params.bookId;
-            const book = await bookCollection.findOne({ _id: new ObjectId(bookId) });
-            res.send(book);
+            try {
+                const book = await bookCollection.findOne({ _id: new ObjectId(bookId) });
+                if (!book) {
+                    return null;
+                }
+                res.send(book);
+            } catch (error) {
+                console.error("Server API Error:", error.message);
+                return null;
+            }
+
         });
 
 
@@ -404,6 +431,15 @@ async function run() {
                     createdAt: new Date(),
                     updatedAt: new Date()
                 };
+
+
+                if (Array.isArray(newBookDoc?.genres)) {
+                    // Loop through, trim whitespace, and convert to lowercase
+                    newBookDoc.genres = newBookDoc.genres.map(genre =>
+                        genre.toLowerCase().trim()
+                    );
+                }
+
 
                 // 5. Insert into book collection (no `content` field)
                 const result = await bookCollection.insertOne(newBookDoc);
@@ -470,7 +506,7 @@ async function run() {
                 }
 
                 if (req.user.role === 'admin') {
-                    const filter = { _id: new ObjectId(bookId)};
+                    const filter = { _id: new ObjectId(bookId) };
                     const updateDoc = { $set: { ...updates, updatedAt: new Date() } };
 
                     const result = await bookCollection.updateOne(filter, updateDoc);
@@ -941,6 +977,12 @@ async function run() {
 
                 // Get total books published
                 const totalBooks = await bookCollection.countDocuments({ writerId });
+                const publishedBooks = await bookCollection.countDocuments({ writerId, visibility: 'publish' });
+
+                // Calculate average price of the writer's books
+                const books = await bookCollection.find({ writerId }).toArray();
+                const totalBooksPrice = books.reduce((sum, b) => sum + (b.price || 0), 0);
+                const avgPrice = books.length > 0 ? (totalBooksPrice / books.length) : 0;
 
                 // Get total sales from transactions
                 const sales = await transactionCollection.find({ writerId, type: 'purchase' }).toArray();
@@ -949,8 +991,10 @@ async function run() {
 
                 res.send({
                     totalBooks,
+                    publishedBooks,
                     totalSales,
                     totalRevenue: totalRevenue.toFixed(2),
+                    avgPrice: avgPrice.toFixed(2),
                     recentSales: sales.slice(0, 5)
                 });
             } catch (error) {
@@ -972,12 +1016,16 @@ async function run() {
                 // Fetch book details for each purchase
                 const enrichedPurchases = await Promise.all(
                     purchases.map(async (purchase) => {
+                        // delete purchase._id; // Remove MongoDB _id to avoid confusion
+                        delete purchase.stripeSessionId;
+                        delete purchase.paymentIntentId;
+
                         const book = await bookCollection.findOne({ _id: new ObjectId(purchase.bookId) });
                         return {
                             ...purchase,
-                            title: book?.title || purchase.bookTitle,
+                            // title: book?.title || purchase.bookTitle,
                             writerName: book?.writerName,
-                            price: book?.price || purchase.amountPaid,
+                            // price: book?.price || purchase.amountPaid,
                             visibility: book?.visibility,
                             image: book?.image
                         };
